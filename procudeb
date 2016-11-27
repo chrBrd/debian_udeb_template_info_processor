@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 
+# Copyright 2016 chrBrd. Released under GPLv3.
+
 ## Err Codes
 
 # 21:		No udeb.list download URI specified.
