@@ -1,0 +1,448 @@
+#!/usr/bin/env bash
+
+## Err Codes
+
+# 21:		No udeb.list download URI specified.
+# 22:		No output filename specified.
+# 32:		Failed to delete existing udeb.list file.
+# 33:		Failed to get udeb.list from repository.
+# 34:		Failed to download packages from repository.
+# 41:		Template extraction failed.
+# 42:		Failed to extract any templates.
+# 50:		Failed to get udeb.list from repository.
+# 51:		Failed to clear directory.
+# 91:		User chose to exit.
+# 92:		User chose to keep existing files.
+# 99:		User exceeded prompt retry limit.
+err_code_21="No udeb.list download URI specified."
+err_code_22="No output filename specified."
+err_code_31="Could not change to package directory."
+err_code_32="Failed to delete existing udeb.list file."
+err_code_33="Failed to get udeb.list from repository."
+err_code_34="Failed to download packages from repository."
+err_code_41="Template extraction failed."
+err_code_50="Failed to create directory."
+err_code_51="Failed to clear directory."
+err_code_91="User chose to exit."
+err_code_92="User chose to keep existing files."
+err_code_99="User exceeded prompt retry limit."
+
+## Variables ##
+max_tries=10
+
+# Default option variables.
+udeb_list_uri="http://ftp.uk.debian.org/debian/dists/jessie/main/installer-amd64/20150422%2bdeb8u4%2bb1/images/udeb.list"
+output_file="preseed.info"
+
+# File/folder variables.
+dir_packages="packages"
+dir_templates="templates"
+dir_processed="processed"
+ext_templates="udebtmpl"
+ext_processed="udebproc"
+
+## Messages ##
+
+# Common messages
+succ="Success!"
+err="Error:"
+msg_yn_choice="(Y)es or (N)o?"
+msg_mkdir="Creating directory: \`%s/\`"
+msg_dir_cleaR="Clearing directory: \`%s/\`"
+msg_files_exist="Directory \`%s/\` already contains files of type \`.%s\` \nDo you want to delete them?"
+msg_del_file="Deleting file %s..."
+msg_user_chose_exit="You chose to exit. Goodbye."
+msg_all_finished="All .udeb template info has been extracted. The collected output has been saved to \`$output_file\`"
+
+# Common error Messages
+msg_err_die="Exiting with error code:"
+msg_err_option_not_rec="$err Command option %s not recognised!"
+msg_err_mkdir="Could not create %s directory!"
+msg_err_rm="Could not remove %s!"
+msg_err_udeb_list_uri=".udeb list not found at given URL!"
+msg_err_exit="Ultimate $err .udeb processor FAILED!!!"
+msg_err_nodir="Directory \`%s/\` does not exist!"
+msg_err_invalid_choice="Invalid choice. Please try again. Valid options are %s"
+msg_too_many_choices="Too many wrong choices! Your cat is attacking your keyboard or you have difficulty with binary decisions."
+
+# Init messages
+msg_init_start="**** STARTING \`.udeb\` PROCESSOR ****"
+msg_init_copyright="Copyright 2016 chrBrd. Released under GNU GPLv3."
+msg_output_file="Collected template preseed info will be written to \`%s\`"
+msg_dir_processed="An individual info file for each package will be saved to \`%s/\`"
+msg_dir_packages="Downloaded packages will be saved to \`%s/\`"
+msg_dir_templates="Extracted templates will be saved to \`%s/\`"
+msg_append_output="Appending to existing output file."
+
+# downloadPackages() messages
+msg_download_start="** DOWNLOADING PACKAGES... **"
+msg_downloading_list="Getting list from \`%s\`"
+msg_download_packages="Downloading packages specified in udeb.list from repository:"
+msg_found_package="Downloaded package:"
+msg_failed_package="Failed to download package:"
+msg_download_end="** $succ Finished downloading packages. **"
+msg_download_pkgs_found="%s packages were downloaded."
+msg_download_pkgs_fail="%s packages failed to download."
+msg_err_download_fail="No packages were downloaded from the repository."
+
+# extractTemplates() messages
+msg_extract_start="** EXTRACTING TEMPLATES... **"
+msg_get_udebs_prompt="Download them from the \`debian-installer\` repo?"
+msg_extract_from="Trying to extract from \`%s\`..."
+msg_extract_found="Template extracted from %s"
+msg_extract_not_found="No template found in \`%s\`"
+msg_extract_found_total="Found %s templates in %s packages."
+msg_extract_end="** $succ Finished extracting templates. **"
+msg_err_no_udebs="No \`.udeb\` files were found in \`%s/\`"
+msg_err_extract="Could not extract a template from \`%s\`"
+msg_err_extract_fail="Failed to extract any templates."
+
+# processingInfo() messages
+msg_proc_start="** PROCESSING TEMPLATES... **"
+msg_processed_on="Processed on:"
+msg_proc_template="Processing %s"
+msg_proc_end="** $succ Template info extracted and processed. **"
+
+
+###	Exit the script.
+  # $1:		[int] 			Error code.
+  # $2		[string]		Exit message
+die()
+{
+  printf "\n$2\n"
+  err_code="err_code_$1"
+  printf "\n$msg_err_die $1: %s\n" "${!err_code}"
+  printf "$msg_err_exit\n\n"
+  exit
+}
+
+###	Execute a callback function on a yes/no prompt.
+  # $1:		string			Prompt text.
+  # $2:		array 			Yes options; callback is first element, followed by its arguments.
+  # $3:		array 			No options;  callback is first element, followed by its arguments.
+promptYN()
+{
+  tries=0
+
+  read -r -n 1 -e -p "$(printf "$1\n> ")" input
+
+  while [ "$tries" -lt "$max_tries" ]; do
+    case "$input" in
+    y | Y )
+      printf "\n"
+      args=( ${!2} )
+      ${args[0]} "${args[@]:1}"
+      return "$?";;
+    n | N )
+       printf "\n"
+      args=( ${!3} )
+      ${args[0]} "${args[@]:1}"
+      return "$?";;
+    * )
+      tries=$(( $tries+1 ))
+      read -r -n 1 -p "$(printf "\n$err $msg_err_invalid_choice \n>" "$1")" input
+    esac
+  done
+
+  # Exit if the user has exceed retry limit.
+  die 99 "\n$err $msg_too_many_choices"
+}
+
+###	User chose to quit at a prompt.
+userExit()
+{
+  die 91 "$msg_user_chose_exit"
+}
+
+###	Check directory for all files of a certain type.
+  # $1:		string			Directory to search.
+  # $2:		string			File extension to search for.
+checkFiles()
+{
+   ls  $(printf "$1/*.$2") > /dev/null 2>&1
+}
+
+###	Remove all files of a certain type from a directory.
+  # $1:		string			Directory to clear.
+  # $2:		string			File extension to clear.
+clearDir()
+{
+  printf "$msg_dir_clear\n" "$1"
+  rm $(printf "$1/*.$2") && return
+  die 51 "$(printf "$err" "$msg_err_rm" "$1/*.$2")"
+}
+
+###	Prepare a directory.
+  # $1:		string			Directory to prepare.
+  # $2:		string			File extension to remove.
+prepDir()
+{
+  # Create the directory if it doesn't exist.
+  if [ ! -d "$1" ]; then
+    printf "$msg_mkdir\n" "$1"
+    mkdir "$PWD/$1" && return
+    die 50 "$(printf "$err" "msg_err_mkdir" "$1")"
+
+  # If it exists then empty it.
+  else
+    # Check it has files first.
+    checkFiles "$1" "$2" || return 92
+
+    # Prompt the user to delete them. Script will continue if choice is 'No'.
+    yes_args=( clearDir "$1" "$2" )
+    promptYN "$(printf "$msg_files_exist" "$1" "$2")" yes_args[@]
+  fi
+}
+
+delPrevOutputFile()
+{
+  # Remove existing preseed info file with this name.
+  if [ -f "$output_file" ]; then
+    printf "msg_del_file" "$output_file"
+    rm "$output_file"
+  fi
+}
+
+###	Options checks. ** Very much TODO. **
+checkOptions()
+{
+  while [ "$1" != "" ]; do
+    case "$1" in
+      ## Append to the existing output file.
+      --add | -a)
+         append_output=true
+         ;;
+      ## Automatically download packages from repository.
+      --get | -g )
+        get=true
+        ;;
+      ## Change the output file.
+      --output | -o )
+        shift
+        if [ ! -z "${1+check}" ]; then
+          output_file="$1"
+        else
+          die 22 "$err $msg_err_opt_no_out"
+        fi
+        ;;
+      ## Download a single package. ** NOT IMPLEMENTED! **
+      --package | -p )
+        shift
+        echo "$1" SINGLE PACKAGES NOT IMPLEMENTED
+        ;;
+      ## Change the udeb.list download URI.
+      --url | -u )
+        shift
+        if [ ! -z "${1+check}" ]; then
+          udeb_list_uri="$1"
+        else
+          die 21 "$err $msg_err_opt_no_uri"
+        fi
+        ;;
+
+      ## Help. ** NOT IMPLEMENTED! **
+      --help | -h )
+        echo HELP NOT IMPLEMENTED
+        ;;
+      ## Unrecognised command.
+      *)
+      printf "$msg_err_option_not_rec\n\n" "$1"
+      exit 1
+    esac
+    shift
+  done
+}
+
+### Process the results of the command options checks.
+initOptions()
+{
+  # Automatically download packages.
+  if [ ! -z "${get+check}" ]; then downloadPackages; fi
+  # Append to or remove the previous output file.
+  if [ ! -z "${append_output:+check}" ]; then
+    echo "$msg_append_output"
+  else
+    delPrevOutputFile
+  fi
+}
+
+### Initialisation.
+procudebInit()
+{
+  # Initial messages.
+  printf "\n\n%s\n\n" "$msg_init_start"
+  printf "$msg_output_file\n" "$output_file"
+  printf "$msg_dir_processed\n" "$dir_processed"
+  printf "$msg_dir_packages\n" "$dir_packages"
+  printf "$msg_dir_templates\n" "$dir_templates"
+
+  # Carry out initialisiation command options.
+  initOptions
+  printf "\n"
+}
+
+###	Download packages from repo.
+downloadPackages()
+{
+ printf "\n$msg_download_start\n"
+
+ # Prepare the download directory.
+ prepDir "$dir_packages" "udeb"
+
+  # Move to the packages directory to download packages using apt-get.
+  cd "$dir_packages" || die 31
+
+  # Delete udeb.list if it already exists.
+  if [ -f udeb.list ]; then
+    rm udeb.list || die 32 "$(printf "$err" "$msg_err_rm\n" "udeb.list")"
+  fi
+
+  # Get udeb.list from the debian-installer repo.
+  printf "$msg_downloading_list\n" "$udeb_list_uri"
+  wget "$udeb_list_uri" > /dev/null 2>&1 || die 33 "$(printf "$err" "$msg_err_udeb_list_uri\n")"
+
+  # Loop through the packages in the list.
+  printf "$msg_download_packages\n"
+  while read udeb_list; do
+
+    # Trim the package name.
+    package_name="$(printf "$udeb_list" | cut -d " " -f1)"
+
+    #Try to  download the package.
+    apt-get download "$package_name" > /dev/null
+    if [ "$?" -eq 0 ]; then
+      printf "$msg_found_package $package_name\n"
+      (( pkgs_found++ ))
+    else
+      printf "$msg_failed_package $package_name\n"
+      (( pkgs_found++ ))
+    fi
+  done < udeb.list
+
+  # Die if no packages downloaded.
+  if [ -z "${pkgs_found:+check}" ]; then die 34 "$err $msg_err_download_fail"; fi
+
+  # Output success and failed numbers.
+  printf "$msg_download_pkgs_found\n" "${pkgs_found:-0}"
+  printf "$msg_download_pkgs_fail\n" "${pkgs_failed:-0}"
+
+  # Delete the list.
+  rm udeb.list || printf "$err" "$msg_err_rm\n" "udeb.list"
+
+  # Move back up to the parent directory.
+  cd ..
+
+  printf "$msg_download_end\n\n"
+}
+
+# Prompt user to download .udebs if they don't exist.
+downloadChoice()
+{
+  printf "$err $msg_err_no_udebs\n" "$dir_packages"
+  yes_args=( downloadPackages  )
+  no_args=( userExit  )
+  promptYN "$(printf "$msg_get_udebs_prompt\n")" yes_args[@] no_args[@]
+}
+
+###	Extract template files from packages.
+extractTemplates()
+{
+  # Get the `.udeb`s  from the `packages` directory.
+  udebs="$dir_packages/*.udeb"
+
+  # If no .udevs are found display download option prompt.
+  ls $udebs > /dev/null 2>&1 ||  downloadChoice
+
+  printf "\n$msg_extract_start\n"
+
+  # Create a `templates` folder if it doesn't exist.
+  prepDir "$dir_templates" "$ext_templates"
+
+  # Loop through the `.udeb`s.
+  for udeb in $udebs; do
+
+  (( tmpl_count++ ))
+
+    # Extract the template.
+    apt-extracttemplates -t $PWD $udeb > /dev/null
+
+
+    # Move found templates to the templates folder.
+    for template in *template*.*; do
+
+      if [ "$template" != "*template*.*" ]; then
+        printf "$msg_extract_found\n" "$template" && (( tmpl_found++ ))
+
+	# Try moving a found template to the templates directory.
+        mv "$template" "$dir_templates/$(printf "$template \n" | sed "s/template.*$/$ext_templates/")" \
+	|| printf "$msg_err_move_failed\n" "$template"
+      fi
+
+      # Delete any config files.
+      rm *.config* > /dev/null 2>&1
+    done
+  done
+
+  # Check there are now template files in the templates directory.
+  if [ -z "${tmpl_found:+check}" ]; then die 41 "$msg_err_extract_fail";
+  else printf "\n$msg_extract_found_total \n" "$tmpl_found" "$tmpl_count"; fi
+
+  printf "$msg_extract_end\n\n"
+
+  return
+}
+
+### Get all the info from the template files, clean it up and save it to the output file.
+processInfo()
+{
+  printf "\n$msg_proc_start\n"
+
+   # Create a `processed` folder if it doesn't exist.
+  prepDir "$dir_processed" "$ext_processed"
+
+  printf "\n$msg_processed_on $(date)\n\n\n" >> "$output_file"
+
+  # Loop through all the template files.
+  templates="$dir_templates/*.$ext_templates"
+
+  for template in $templates ; do
+    # Get the name of the package for use in files and a title header.
+    name=$(printf "$template" |cut -d"/" -f2 |cut -d"." -f1)
+    title=$(printf "$name" | tr "[:lower:]" "[:upper:]")
+
+    printf "$msg_proc_template\n" "$name"
+
+     # Extract data from templates  and process it to make it readable. This lot's nicked from Debian's site.
+    info=$(sed '/^Indices-.*\.UTF-8/d' "$template" \
+      | sed '/^Choices-.*\.UTF-8/d' \
+      | awk '/^Template:/,/-.*\.UTF-8:/' \
+      | awk '!/-.*\.UTF-8:/' \
+      | sed '/^Template:/{x;p;x;}' \
+      | sed ':a $!N;s/\nType: text/ Type: text/;ta P;D' \
+      | sed '/Type: text/,/^$/d' \
+      | sed ':a $!N;s/\nType: error/ Type: error/;ta P;D' \
+      | sed '/Type: error/,/^$/d' \
+      | sed ':a $!N;s/\nType: title/ Type: title/;ta P;D' \
+      | sed '/Type: title/,/^$/d' \
+      | sed ':a $!N;s/\nType: note/ Type: note/;ta P;D' \
+      | sed '/Type: note/,/^$/d')
+
+    # Write to the output file if the package has any template info.
+    if [ "$info" != "" ]; then
+      echo -e "****$title****" | tee -a  "$dir_processed/$name.$ext_processed" "$output_file" > /dev/null \
+      ||  (printf "msg_err_writeout\n\n" "$output_file" && exit)
+      echo  -e "$info \n\n\n" | tee -a "$dir_processed/$name.$ext_processed" "$output_file" > /dev/null \
+      ||  (printf "msg_err_writeout\n\n" "$output_file" && exit)
+    fi
+  done
+
+  printf "$msg_proc_end\n\n"
+}
+
+### Main sequence
+checkOptions "$@"
+procudebInit
+extractTemplates
+processInfo
+
+printf "\nUltimate $succ $msg_all_finished\n\n"
